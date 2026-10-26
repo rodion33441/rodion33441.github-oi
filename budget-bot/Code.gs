@@ -9,8 +9,8 @@
 const CONFIG = {
   TELEGRAM_TOKEN: '',   // токен бота от @BotFather (или свойство скрипта TELEGRAM_TOKEN)
   CHAT_ID: '',          // твой Telegram ID (узнать у @userinfobot); пусто — connectTelegram() найдёт сам
-  SECRET: '',
-  OWNER_NAME: '',       // твоё имя и отчество, как в уведомлениях банка: переводы самому себе не считаются тратой           // ключ для MacroDroid; пусто — setup() придумает сам
+  SECRET: '',           // ключ для MacroDroid; пусто — setup() придумает сам
+  OWNER_NAME: '',       // твоё имя и отчество, как в уведомлениях банка: переводы самому себе не считаются тратой
   TIMEZONE: 'Europe/Moscow',
   INCOME: 10000,        // обычный доход в месяц, ₽
   INCOME_SPREAD: 3000,  // насколько доход может гулять в минус — план строим по худшему случаю
