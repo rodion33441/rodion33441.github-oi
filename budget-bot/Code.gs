@@ -8,6 +8,7 @@
 // ===== Настройки: меняй под себя =====
 const CONFIG = {
   TELEGRAM_TOKEN: '',   // токен бота от @BotFather (или свойство скрипта TELEGRAM_TOKEN)
+  CHAT_ID: '',          // твой Telegram ID (узнать у @userinfobot); пусто — connectTelegram() найдёт сам
   SECRET: '',           // ключ для MacroDroid; пусто — setup() придумает сам
   TIMEZONE: 'Europe/Moscow',
   INCOME: 10000,        // обычный доход в месяц, ₽
