@@ -7,6 +7,8 @@
 
 // ===== Настройки: меняй под себя =====
 const CONFIG = {
+  TELEGRAM_TOKEN: '',   // токен бота от @BotFather (или свойство скрипта TELEGRAM_TOKEN)
+  SECRET: '',           // ключ для MacroDroid; пусто — setup() придумает сам
   TIMEZONE: 'Europe/Moscow',
   INCOME: 10000,        // обычный доход в месяц, ₽
   INCOME_SPREAD: 3000,  // насколько доход может гулять в минус — план строим по худшему случаю
@@ -210,7 +212,7 @@ function dailyReport() {
 /** Запусти один раз: создаёт таблицу, расписание и секретный ключ для MacroDroid. */
 function setup() {
   const props = PropertiesService.getScriptProperties();
-  if (!props.getProperty('SECRET')) props.setProperty('SECRET', Utilities.getUuid().slice(0, 12));
+  if (!prop_('SECRET')) props.setProperty('SECRET', Utilities.getUuid().slice(0, 12));
   sheet_();
   ScriptApp.getProjectTriggers().forEach(t => ScriptApp.deleteTrigger(t));
   ScriptApp.newTrigger('monthlyPlan').timeBased().onMonthDay(1).atHour(9).inTimezone(CONFIG.TIMEZONE).create();
@@ -218,7 +220,10 @@ function setup() {
   if (CONFIG.DAILY_REPORT) {
     ScriptApp.newTrigger('dailyReport').timeBased().everyDays(1).atHour(CONFIG.REPORT_HOUR).inTimezone(CONFIG.TIMEZONE).create();
   }
-  Logger.log('Готово. Секретный ключ для MacroDroid: ' + props.getProperty('SECRET'));
+  Logger.log('Готово. Секретный ключ для MacroDroid: ' + prop_('SECRET'));
+  if (prop_('TELEGRAM_TOKEN') && !prop_('CHAT_ID')) {
+    try { connectTelegram(); } catch (err) { Logger.log(err.message); }
+  }
 }
 
 /** Напиши боту /start, потом запусти эту функцию — она запомнит твой чат. */
@@ -271,7 +276,7 @@ function send_(html) {
   });
 }
 
-function prop_(name) { return PropertiesService.getScriptProperties().getProperty(name); }
+function prop_(name) { return PropertiesService.getScriptProperties().getProperty(name) || CONFIG[name] || ''; }
 function text_(s) { return ContentService.createTextOutput(s); }
 function sum_(ops) { return ops.reduce((s, o) => s + o.amount, 0); }
 function rub_(n) { return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ' ') + ' ₽'; }
