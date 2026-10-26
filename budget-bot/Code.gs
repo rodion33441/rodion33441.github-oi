@@ -63,7 +63,7 @@ function doGet() {
 
 /** Разбирает текст уведомления: «Покупка на 250 ₽. Пятёрочка» → {type, amount, place, category}. */
 function parseNotification(text) {
-  const raw = String(text || '').replace(/[   ]/g, ' ').replace(/\s+/g, ' ').trim();
+  const raw = String(text || '').replace(/[\u00a0\u202f\u2009]/g, ' ').replace(/\s+/g, ' ').trim();
   const m = raw.match(/(\d[\d ]*(?:[.,]\d{1,2})?)\s*(?:₽|руб|RUB|р\.)/i);
   if (!m) return null;
   const amount = parseFloat(m[1].replace(/ /g, '').replace(',', '.'));
