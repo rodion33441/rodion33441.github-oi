@@ -12,14 +12,13 @@ const CONFIG = {
   SECRET: '',           // ключ для MacroDroid; пусто — setup() придумает сам
   OWNER_NAME: '',       // твоё имя и отчество, как в уведомлениях банка: переводы самому себе не считаются тратой
   TIMEZONE: 'Europe/Moscow',
-  INCOME: 10000,        // обычный доход в месяц, ₽
-  INCOME_SPREAD: 3000,  // насколько доход может гулять в минус — план строим по худшему случаю
-  LIFE: 3000,           // на жизнь в месяц: еда, проезд, мелочи, ₽
-  BILLS: [              // обязательные платежи: что, сколько, какого числа
+  SAVE_PCT: 20,         // сколько процентов с каждого пополнения откладывать в копилку
+  START_BALANCE: 0,     // сколько денег на траты уже было на карте, когда подключил бота, ₽
+  BILLS: [              // обязательные платежи: что, сколько, какого числа — бот заранее отложит на них
     // { name: 'Связь', amount: 400, day: 5 },
   ],
-  INSTANT: true,        // сообщение сразу после каждой покупки и поступления
-  DAILY_REPORT: true,   // короткий отчёт каждый вечер
+  INSTANT: true,        // сообщение сразу после каждой покупки и пополнения
+  DAILY_REPORT: true,   // итог дня каждый вечер
   REPORT_HOUR: 21,
 };
 
@@ -63,33 +62,6 @@ function doPost(e) {
   return text_('ok');
 }
 
-/** Сразу после операции: сколько осталось на сегодня или сколько отложить. */
-function instantReport_(op) {
-  const s = monthStats_(new Date());
-  const lines = [];
-  if (op.type === 'out') {
-    const today = Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'yyyy-MM-dd');
-    const spentToday = sum_(s.ops.filter(o => o.type === 'out' && Utilities.formatDate(o.date, CONFIG.TIMEZONE, 'yyyy-MM-dd') === today));
-    const todayLimit = Math.max(0, s.left + spentToday) / (s.days - s.day + 1);
-    const rest = todayLimit - spentToday;
-    lines.push(`−${rub_(op.amount)} ${esc_(op.place || op.category)}`);
-    lines.push(rest >= 0
-      ? `На сегодня осталось: <b>${rub_(rest)}</b>`
-      : `🔴 Сегодня уже перерасход на ${rub_(-rest)} — завтра лимит станет меньше`);
-  } else {
-    // С денег до минимального дохода откладываем процент из плана, всё сверх минимума — целиком
-    const p = s.plan;
-    const before = s.income - op.amount;
-    const belowMin = Math.max(0, Math.min(op.amount, p.incomeMin - before));
-    const toSave = Math.round(belowMin * p.savePct / 100 + (op.amount - belowMin));
-    lines.push(`+${rub_(op.amount)} пришло`);
-    lines.push(toSave > 0
-      ? `💰 Отложи в копилку: <b>${rub_(toSave)}</b>`
-      : 'Всё уйдёт на жизнь до конца месяца — в этот раз без копилки');
-  }
-  send_(lines.join('\n'));
-}
-
 function doGet() {
   return text_('Бюджет-бот работает');
 }
@@ -125,37 +97,38 @@ function categorize_(text) {
 
 // ===== Расчёты =====
 
-function plan_() {
-  const bills = CONFIG.BILLS.reduce((s, b) => s + b.amount, 0);
-  const incomeMin = CONFIG.INCOME - CONFIG.INCOME_SPREAD;
-  const budget = bills + CONFIG.LIFE;  // сколько можно потратить за месяц вместе с платежами
-  const saveMin = Math.max(0, incomeMin - budget);
-  return { bills, incomeMin, budget, saveMin, savePct: incomeMin ? Math.floor(saveMin / incomeMin * 100) : 0 };
-}
-
-function monthStats_(date) {
+/**
+ * Правило простое: с каждого пополнения SAVE_PCT% — в копилку, остальное — на траты.
+ * Всё, что на траты и ещё не потрачено, делим на оставшиеся дни месяца.
+ */
+function state_(date) {
   const tz = CONFIG.TIMEZONE;
-  const key = Utilities.formatDate(date, tz, 'yyyy-MM');
+  const fmt = (d, f) => Utilities.formatDate(d, tz, f);
+  const key = fmt(date, 'yyyy-MM'), today = fmt(date, 'yyyy-MM-dd');
   const [y, m] = key.split('-').map(Number);
   const days = new Date(y, m, 0).getDate();
-  const day = Number(Utilities.formatDate(date, tz, 'd'));
-  const ops = readOps_().filter(o => Utilities.formatDate(o.date, tz, 'yyyy-MM') === key);
-  const p = plan_();
+  const day = Number(fmt(date, 'd'));
+  const keep = 1 - CONFIG.SAVE_PCT / 100;
 
-  // Бот видит траты только с первого запуска — в этом месяце бюджет считаем с того дня
-  const start = startDate_();
-  const fromDay = Utilities.formatDate(start, tz, 'yyyy-MM') === key ? Number(Utilities.formatDate(start, tz, 'd')) : 1;
-  const activeDays = days - fromDay + 1;
-  const life = CONFIG.LIFE * activeDays / days;
-  const bills = CONFIG.BILLS.filter(b => Math.min(b.day, days) >= fromDay);
+  const all = readOps_().filter(o => o.date <= date);
+  const ops = all.filter(o => fmt(o.date, 'yyyy-MM') === key);
+  const todayOps = ops.filter(o => o.type === 'out' && fmt(o.date, 'yyyy-MM-dd') === today);
+
+  const pool = CONFIG.START_BALANCE + sum_(all.filter(o => o.type === 'in')) * keep - sum_(all.filter(o => o.type === 'out'));
+  const billsLeft = sum_(CONFIG.BILLS.filter(b => Math.min(b.day, days) > day));
+  const free = pool - billsLeft;                          // можно тратить до конца месяца
+  const spentToday = sum_(todayOps);
+  const daysLeft = days - day + 1;                        // включая сегодня
+  const todayLimit = Math.max(0, free + spentToday) / daysLeft;
 
   const income = sum_(ops.filter(o => o.type === 'in'));
-  const spent = sum_(ops.filter(o => o.type === 'out'));
-  const billsLeft = sum_(bills.filter(b => Math.min(b.day, days) > day));
-  const left = sum_(bills) + life - spent - billsLeft;     // осталось на жизнь до конца месяца
-  const normSpent = (sum_(bills) - billsLeft) + life * Math.max(0, day - fromDay + 1) / activeDays;  // сколько «положено» потратить к этому дню
-  const canSave = income - spent - billsLeft - Math.max(0, left);       // лишнее, что можно отложить уже сейчас
-  return { key, y, m, days, day, ops, income, spent, billsLeft, left, normSpent, canSave, plan: p };
+  return {
+    y, m, day, days, daysLeft, ops, todayOps, pool, free, billsLeft, spentToday, todayLimit,
+    restToday: todayLimit - spentToday,
+    tomorrow: daysLeft > 1 ? Math.max(0, free) / (daysLeft - 1) : 0,
+    income, saved: income * CONFIG.SAVE_PCT / 100, spent: sum_(ops.filter(o => o.type === 'out')),
+    savedTotal: sum_(all.filter(o => o.type === 'in')) * CONFIG.SAVE_PCT / 100,
+  };
 }
 
 function startDate_() {
@@ -179,95 +152,91 @@ function categoryLines_(ops, total) {
     .map(([name, amount]) => `${name}: ${rub_(amount)} (${Math.round(amount / total * 100)}%)`);
 }
 
-function paceLine_(s) {
-  const diff = s.spent - s.normSpent;
-  if (diff > s.normSpent * 0.1 && diff > 200) {
-    return `🔴 Тратишь больше плана: на ${rub_(diff)} больше, чем можно было к сегодняшнему дню. Притормози.`;
-  }
-  if (diff < -s.normSpent * 0.1 && diff < -200) {
-    return `🟢 Ты в плюсе: потратил на ${rub_(-diff)} меньше, чем можно было к сегодняшнему дню.`;
-  }
-  return '🟡 Всё по плану.';
+function poolLine_(s) {
+  if (s.free <= 0) return '⚠️ Деньги на траты закончились — до следующего пополнения лучше ничего не покупать.';
+  return `На траты осталось: <b>${rub_(s.free)}</b> → примерно <b>${rub_(s.free / s.daysLeft)} в день</b> до конца месяца`;
 }
 
 // ===== Отчёты в Telegram =====
 
-/** 1-го числа: итоги прошлого месяца и план на новый. */
+/** Сразу после операции. */
+function instantReport_(op) {
+  const s = state_(new Date());
+  const lines = [];
+  if (op.type === 'out') {
+    lines.push(`−${rub_(op.amount)} ${esc_(op.place || op.category)}`);
+    lines.push(s.restToday >= 0
+      ? `На сегодня осталось: <b>${rub_(s.restToday)}</b>`
+      : `🔴 Сегодня перерасход на ${rub_(-s.restToday)} — завтра лимит станет меньше`);
+  } else {
+    const save = Math.round(op.amount * CONFIG.SAVE_PCT / 100);
+    lines.push(`<b>+${rub_(op.amount)} пришло</b>`, '',
+      `💰 В копилку (${CONFIG.SAVE_PCT}%): <b>${rub_(save)}</b> — переведи на накопительный счёт`,
+      `🛒 На траты: +${rub_(op.amount - save)}`, '',
+      poolLine_(s));
+  }
+  send_(lines.join('\n'));
+}
+
+/** Каждый вечер: итог дня. */
+function dailyReport() {
+  const s = state_(new Date());
+  const lines = [`<b>Итог дня, ${s.day} ${monthName_(s.m, true)}</b>`, '', `Потратил сегодня: <b>${rub_(s.spentToday)}</b>`];
+  s.todayOps.forEach(o => lines.push(`• ${rub_(o.amount)} — ${esc_(o.place || o.category)}`));
+  lines.push('', s.restToday >= 0
+    ? `🟢 Уложился в лимит (было можно ${rub_(s.todayLimit)})`
+    : `🔴 Перерасход на ${rub_(-s.restToday)} (было можно ${rub_(s.todayLimit)})`);
+  if (s.free <= 0) {
+    lines.push('', poolLine_(s));
+  } else if (s.daysLeft > 1) {
+    lines.push('', `Можно тратить завтра: <b>${rub_(s.tomorrow)}</b>`,
+      `(на траты осталось ${rub_(s.free)} на ${s.daysLeft - 1} ${days_(s.daysLeft - 1)})`);
+  }
+  send_(lines.join('\n'));
+}
+
+/** По понедельникам: итог недели. */
+function weeklyReport() {
+  const s = state_(new Date());
+  const weekAgo = new Date(Date.now() - 7 * 24 * 3600 * 1000);
+  const week = readOps_().filter(o => o.date >= weekAgo);
+  const weekSpent = sum_(week.filter(o => o.type === 'out'));
+
+  const lines = [`<b>📊 Итог недели</b>`, '', `За неделю потратил: <b>${rub_(weekSpent)}</b>`];
+  if (weekSpent) lines.push(...categoryLines_(week, weekSpent));
+  lines.push('', `<b>С начала месяца</b>`,
+    `Пришло: ${rub_(s.income)}`,
+    `В копилку (${CONFIG.SAVE_PCT}%): ${rub_(s.saved)}`,
+    `Потратил: ${rub_(s.spent)}`,
+    '', poolLine_(s));
+  if (s.billsLeft) lines.push(`(уже без обязательных платежей впереди: ${rub_(s.billsLeft)})`);
+  send_(lines.join('\n'));
+}
+
+/** 1-го числа: итоги прошлого месяца и как жить в новом. */
 function monthlyPlan() {
   const now = new Date();
-  const prev = monthStats_(new Date(now.getTime() - 24 * 3600 * 1000 * now.getDate()));
-  const p = plan_();
-  const days = new Date(Number(Utilities.formatDate(now, CONFIG.TIMEZONE, 'yyyy')),
-    Number(Utilities.formatDate(now, CONFIG.TIMEZONE, 'M')), 0).getDate();
+  const prevDay = new Date(now.getTime() - 24 * 3600 * 1000 * Number(Utilities.formatDate(now, CONFIG.TIMEZONE, 'd')));
+  const prev = state_(prevDay);
+  const s = state_(now);
   const lines = [];
 
   if (prev.ops.length) {
     lines.push(`<b>Итоги: ${monthName_(prev.m)}</b>`,
       `Пришло: ${rub_(prev.income)}`,
-      `Потрачено: ${rub_(prev.spent)}`,
-      `Осталось/отложено: ${rub_(prev.income - prev.spent)}`);
+      `В копилку (${CONFIG.SAVE_PCT}%): ${rub_(prev.saved)}`,
+      `Потратил: ${rub_(prev.spent)}`);
     if (prev.spent) lines.push('', 'Куда ушли деньги:', ...categoryLines_(prev.ops, prev.spent));
-    lines.push('');
+    lines.push('', `💰 Всего в копилке должно быть: <b>${rub_(s.savedTotal)}</b>`, '');
   }
 
-  lines.push(`<b>📅 План на ${monthName_(Number(Utilities.formatDate(now, CONFIG.TIMEZONE, 'M')))}</b>`,
-    `Доход ждём ${rub_(p.incomeMin)}–${rub_(CONFIG.INCOME + CONFIG.INCOME_SPREAD)}, считаем по минимуму: ${rub_(p.incomeMin)}.`);
+  lines.push(`<b>📅 ${monthName_(s.m)[0].toUpperCase() + monthName_(s.m).slice(1)}: правило месяца</b>`,
+    `С каждого пополнения ${CONFIG.SAVE_PCT}% — в копилку, ${100 - CONFIG.SAVE_PCT}% — на траты. Сколько куда — подскажу сразу, как придут деньги.`);
   if (CONFIG.BILLS.length) {
-    lines.push('', 'Обязательные платежи:',
+    lines.push('', 'Обязательные платежи (я заранее оставлю на них деньги):',
       ...CONFIG.BILLS.slice().sort((a, b) => a.day - b.day).map(b => `• ${esc_(b.name)}: ${rub_(b.amount)} — ${b.day}-го`));
   }
-  lines.push('', `На жизнь: ${rub_(CONFIG.LIFE)} → <b>${rub_(CONFIG.LIFE / days)} в день</b>, ~${rub_(CONFIG.LIFE / days * 7)} в неделю.`);
-
-  if (p.saveMin > 0) {
-    lines.push('', `💰 <b>Копилка: с каждого поступления сразу откладывай ${p.savePct}%</b> (минимум ${rub_(p.saveMin)} за месяц).`,
-      `Всё, что пришло сверх ${rub_(p.incomeMin)}, — целиком в копилку.`,
-      'Что осталось в конце месяца — тоже в копилку.');
-  } else {
-    lines.push('', `⚠️ Платежи и жизнь (${rub_(p.budget)}) съедают весь минимальный доход. Откладывай всё, что пришло сверх ${rub_(p.budget)}.`);
-  }
-  send_(lines.join('\n'));
-}
-
-/** По понедельникам: как идёт месяц. */
-function weeklyReport() {
-  const s = monthStats_(new Date());
-  const weekAgo = new Date(Date.now() - 7 * 24 * 3600 * 1000);
-  const week = s.ops.filter(o => o.date >= weekAgo);
-  const weekSpent = sum_(week.filter(o => o.type === 'out'));
-  const daysLeft = s.days - s.day + 1;
-
-  const lines = [`<b>📊 Итог недели</b>`, '', `За неделю потратил: <b>${rub_(weekSpent)}</b>`];
-  if (weekSpent) lines.push(...categoryLines_(week, weekSpent));
-  lines.push('', `<b>С начала месяца</b>`,
-    `Пришло денег: ${rub_(s.income)}`,
-    `Потратил: ${rub_(s.spent)}`,
-    '', paceLine_(s),
-    '', `Можно тратить в день до конца месяца: <b>${rub_(Math.max(0, s.left) / daysLeft)}</b>`,
-    `(на жизнь осталось ${rub_(Math.max(0, s.left))} на ${daysLeft} ${days_(daysLeft)})`);
-  if (s.billsLeft) lines.push(`Ещё впереди обязательные платежи: ${rub_(s.billsLeft)}`);
-  if (s.canSave > 0) lines.push('', `💰 Можно отложить в копилку: <b>${rub_(s.canSave)}</b>. Это лишнее сверх того, что нужно до конца месяца.`);
-  if (s.income < s.plan.incomeMin && s.day > 20) lines.push(`⚠️ Доход пока ниже минимума (${rub_(s.plan.incomeMin)}) — трать осторожнее.`);
-  send_(lines.join('\n'));
-}
-
-/** Каждый вечер: сколько ушло сегодня и сколько можно завтра. */
-function dailyReport() {
-  const s = monthStats_(new Date());
-  const today = Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'yyyy-MM-dd');
-  const ops = s.ops.filter(o => o.type === 'out' && Utilities.formatDate(o.date, CONFIG.TIMEZONE, 'yyyy-MM-dd') === today);
-  const spentToday = sum_(ops);
-  const daysLeft = s.days - s.day;
-  const lines = [`<b>Итог дня, ${s.day} ${monthName_(s.m, true)}</b>`, '', `Потратил сегодня: <b>${rub_(spentToday)}</b>`];
-  ops.forEach(o => lines.push(`• ${rub_(o.amount)} — ${esc_(o.place || o.category)}`));
-  lines.push('');
-  if (daysLeft > 0) {
-    lines.push(`Можно тратить завтра: <b>${rub_(Math.max(0, s.left) / daysLeft)}</b>`,
-      `(на жизнь до конца месяца осталось ${rub_(Math.max(0, s.left))} на ${daysLeft} ${days_(daysLeft)})`);
-  } else {
-    lines.push('Завтра новый месяц — утром придёт план.');
-  }
-  lines.push('', paceLine_(s));
-  if (s.canSave > 0) lines.push('', `💰 Можно отложить в копилку: ${rub_(s.canSave)}. Это лишнее сверх того, что нужно до конца месяца.`);
+  lines.push('', poolLine_(s));
   send_(lines.join('\n'));
 }
 
@@ -297,8 +266,7 @@ function connectTelegram() {
   const msg = (res.result || []).map(u => u.message).filter(Boolean).pop();
   if (!msg) throw new Error('Бот не видит сообщений. Напиши ему /start в Telegram и запусти ещё раз.');
   PropertiesService.getScriptProperties().setProperty('CHAT_ID', String(msg.chat.id));
-  send_('✅ Бот подключён! План придёт 1-го числа, отчёт — по понедельникам' +
-    (CONFIG.DAILY_REPORT ? ` и каждый вечер в ${CONFIG.REPORT_HOUR}:00.` : '.'));
+  send_('✅ Бот подключён!');
 }
 
 // ===== Вспомогательное =====
