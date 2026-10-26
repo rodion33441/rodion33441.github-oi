@@ -18,6 +18,7 @@ const CONFIG = {
   BILLS: [              // обязательные платежи: что, сколько, какого числа
     // { name: 'Связь', amount: 400, day: 5 },
   ],
+  INSTANT: true,        // сообщение сразу после каждой покупки и поступления
   DAILY_REPORT: true,   // короткий отчёт каждый вечер
   REPORT_HOUR: 21,
 };
@@ -56,7 +57,37 @@ function doPost(e) {
   if (last && last[5] === op.raw && now - new Date(last[0]) < 2 * 60 * 1000) return text_('duplicate');
 
   sheet.appendRow([now, op.type, op.amount, op.place, op.category, op.raw]);
+  if (CONFIG.INSTANT && (op.type === 'in' || op.type === 'out')) {
+    try { instantReport_(op); } catch (err) { console.error(err); }  // запись в таблицу важнее сообщения
+  }
   return text_('ok');
+}
+
+/** Сразу после операции: сколько осталось на сегодня или сколько отложить. */
+function instantReport_(op) {
+  const s = monthStats_(new Date());
+  const lines = [];
+  if (op.type === 'out') {
+    const today = Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'yyyy-MM-dd');
+    const spentToday = sum_(s.ops.filter(o => o.type === 'out' && Utilities.formatDate(o.date, CONFIG.TIMEZONE, 'yyyy-MM-dd') === today));
+    const todayLimit = Math.max(0, s.left + spentToday) / (s.days - s.day + 1);
+    const rest = todayLimit - spentToday;
+    lines.push(`−${rub_(op.amount)} ${esc_(op.place || op.category)}`);
+    lines.push(rest >= 0
+      ? `На сегодня осталось: <b>${rub_(rest)}</b>`
+      : `🔴 Сегодня уже перерасход на ${rub_(-rest)} — завтра лимит станет меньше`);
+  } else {
+    // С денег до минимального дохода откладываем процент из плана, всё сверх минимума — целиком
+    const p = s.plan;
+    const before = s.income - op.amount;
+    const belowMin = Math.max(0, Math.min(op.amount, p.incomeMin - before));
+    const toSave = Math.round(belowMin * p.savePct / 100 + (op.amount - belowMin));
+    lines.push(`+${rub_(op.amount)} пришло`);
+    lines.push(toSave > 0
+      ? `💰 Отложи в копилку: <b>${rub_(toSave)}</b>`
+      : 'Всё уйдёт на жизнь до конца месяца — в этот раз без копилки');
+  }
+  send_(lines.join('\n'));
 }
 
 function doGet() {
