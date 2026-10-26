@@ -10,7 +10,7 @@ const CONFIG = {
   TIMEZONE: 'Europe/Moscow',
   INCOME: 10000,        // обычный доход в месяц, ₽
   INCOME_SPREAD: 3000,  // насколько доход может гулять в минус — план строим по худшему случаю
-  LIFE: 5000,           // на жизнь в месяц: еда, проезд, мелочи, ₽
+  LIFE: 3000,           // на жизнь в месяц: еда, проезд, мелочи, ₽
   BILLS: [              // обязательные платежи: что, сколько, какого числа
     // { name: 'Связь', amount: 400, day: 5 },
   ],
@@ -234,7 +234,17 @@ function connectTelegram() {
 // ===== Вспомогательное =====
 
 function sheet_() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  // Скрипт можно создать и из таблицы, и отдельно на script.google.com — тогда таблица создастся сама
+  let ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss) {
+    const props = PropertiesService.getScriptProperties();
+    const id = props.getProperty('SHEET_ID');
+    ss = id ? SpreadsheetApp.openById(id) : SpreadsheetApp.create('Бюджет');
+    if (!id) {
+      props.setProperty('SHEET_ID', ss.getId());
+      Logger.log('Создана таблица: ' + ss.getUrl());
+    }
+  }
   let sh = ss.getSheetByName(SHEET_NAME);
   if (!sh) {
     sh = ss.insertSheet(SHEET_NAME);
