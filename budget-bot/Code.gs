@@ -9,7 +9,8 @@
 const CONFIG = {
   TELEGRAM_TOKEN: '',   // токен бота от @BotFather (или свойство скрипта TELEGRAM_TOKEN)
   CHAT_ID: '',          // твой Telegram ID (узнать у @userinfobot); пусто — connectTelegram() найдёт сам
-  SECRET: '',           // ключ для MacroDroid; пусто — setup() придумает сам
+  SECRET: '',
+  OWNER_NAME: '',       // твоё имя и отчество, как в уведомлениях банка: переводы самому себе не считаются тратой           // ключ для MacroDroid; пусто — setup() придумает сам
   TIMEZONE: 'Europe/Moscow',
   INCOME: 10000,        // обычный доход в месяц, ₽
   INCOME_SPREAD: 3000,  // насколько доход может гулять в минус — план строим по худшему случаю
@@ -74,6 +75,7 @@ function parseNotification(text) {
   if (/между (своими )?сч|накопительн|копилк|вклад/i.test(raw)) type = 'internal';  // свои деньги между своими счетами
   else if (/пополнени|зачислени|поступлени|возврат|кешб[эе]к|кэшб[эе]к|cashback|перевод от|входящ/i.test(raw)) type = 'in';
   else if (/покупк|оплат|списани|снятие|перевод|плат[её]ж|подписк/i.test(raw)) type = 'out';
+  if (type === 'out' && CONFIG.OWNER_NAME && raw.toLowerCase().includes(CONFIG.OWNER_NAME.toLowerCase())) type = 'internal';
 
   // Где потратил — обычно следующее предложение после суммы
   const after = raw.slice(m.index + m[0].length).replace(/^[.,:;\s]+/, '');
@@ -109,13 +111,30 @@ function monthStats_(date) {
   const ops = readOps_().filter(o => Utilities.formatDate(o.date, tz, 'yyyy-MM') === key);
   const p = plan_();
 
+  // Бот видит траты только с первого запуска — в этом месяце бюджет считаем с того дня
+  const start = startDate_();
+  const fromDay = Utilities.formatDate(start, tz, 'yyyy-MM') === key ? Number(Utilities.formatDate(start, tz, 'd')) : 1;
+  const activeDays = days - fromDay + 1;
+  const life = CONFIG.LIFE * activeDays / days;
+  const bills = CONFIG.BILLS.filter(b => Math.min(b.day, days) >= fromDay);
+
   const income = sum_(ops.filter(o => o.type === 'in'));
   const spent = sum_(ops.filter(o => o.type === 'out'));
-  const billsLeft = CONFIG.BILLS.filter(b => Math.min(b.day, days) > day).reduce((s, b) => s + b.amount, 0);
-  const left = p.budget - spent - billsLeft;               // осталось на жизнь до конца месяца
-  const normSpent = (p.bills - billsLeft) + CONFIG.LIFE * day / days;  // сколько «положено» потратить к этому дню
+  const billsLeft = sum_(bills.filter(b => Math.min(b.day, days) > day));
+  const left = sum_(bills) + life - spent - billsLeft;     // осталось на жизнь до конца месяца
+  const normSpent = (sum_(bills) - billsLeft) + life * Math.max(0, day - fromDay + 1) / activeDays;  // сколько «положено» потратить к этому дню
   const canSave = income - spent - billsLeft - Math.max(0, left);       // лишнее, что можно отложить уже сейчас
   return { key, y, m, days, day, ops, income, spent, billsLeft, left, normSpent, canSave, plan: p };
+}
+
+function startDate_() {
+  const props = PropertiesService.getScriptProperties();
+  let start = props.getProperty('START');
+  if (!start) {
+    start = new Date().toISOString();
+    props.setProperty('START', start);
+  }
+  return new Date(start);
 }
 
 function byCategory_(ops) {
@@ -131,9 +150,13 @@ function categoryLines_(ops, total) {
 
 function paceLine_(s) {
   const diff = s.spent - s.normSpent;
-  if (diff > s.normSpent * 0.1 && diff > 200) return `🔴 Перерасход: потрачено на ${rub_(diff)} больше плана`;
-  if (diff < -s.normSpent * 0.1 && diff < -200) return `🟢 Экономишь: на ${rub_(-diff)} меньше плана`;
-  return '🟡 Идёшь по плану';
+  if (diff > s.normSpent * 0.1 && diff > 200) {
+    return `🔴 Тратишь больше плана: на ${rub_(diff)} больше, чем можно было к сегодняшнему дню. Притормози.`;
+  }
+  if (diff < -s.normSpent * 0.1 && diff < -200) {
+    return `🟢 Ты в плюсе: потратил на ${rub_(-diff)} меньше, чем можно было к сегодняшнему дню.`;
+  }
+  return '🟡 Всё по плану.';
 }
 
 // ===== Отчёты в Telegram =====
@@ -182,14 +205,16 @@ function weeklyReport() {
   const weekSpent = sum_(week.filter(o => o.type === 'out'));
   const daysLeft = s.days - s.day + 1;
 
-  const lines = [`<b>📊 Неделя: ${rub_(weekSpent)} потрачено</b>`];
+  const lines = [`<b>📊 Итог недели</b>`, '', `За неделю потратил: <b>${rub_(weekSpent)}</b>`];
   if (weekSpent) lines.push(...categoryLines_(week, weekSpent));
-  lines.push('', `<b>С начала месяца</b> (${s.day} из ${s.days} дней)`,
-    `Пришло: ${rub_(s.income)} · Потрачено: ${rub_(s.spent)}`,
-    paceLine_(s),
-    '', `На жизнь осталось: ${rub_(Math.max(0, s.left))} → <b>${rub_(Math.max(0, s.left) / daysLeft)} в день</b>`);
-  if (s.billsLeft) lines.push(`Ещё впереди платежи: ${rub_(s.billsLeft)}`);
-  if (s.canSave > 0) lines.push(`💰 Свободно сверх плана: <b>${rub_(s.canSave)}</b> — если ещё не отложил, переведи в копилку`);
+  lines.push('', `<b>С начала месяца</b>`,
+    `Пришло денег: ${rub_(s.income)}`,
+    `Потратил: ${rub_(s.spent)}`,
+    '', paceLine_(s),
+    '', `Можно тратить в день до конца месяца: <b>${rub_(Math.max(0, s.left) / daysLeft)}</b>`,
+    `(на жизнь осталось ${rub_(Math.max(0, s.left))} на ${daysLeft} ${days_(daysLeft)})`);
+  if (s.billsLeft) lines.push(`Ещё впереди обязательные платежи: ${rub_(s.billsLeft)}`);
+  if (s.canSave > 0) lines.push('', `💰 Можно отложить в копилку: <b>${rub_(s.canSave)}</b>. Это лишнее сверх того, что нужно до конца месяца.`);
   if (s.income < s.plan.incomeMin && s.day > 20) lines.push(`⚠️ Доход пока ниже минимума (${rub_(s.plan.incomeMin)}) — трать осторожнее.`);
   send_(lines.join('\n'));
 }
@@ -200,11 +225,18 @@ function dailyReport() {
   const today = Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'yyyy-MM-dd');
   const ops = s.ops.filter(o => o.type === 'out' && Utilities.formatDate(o.date, CONFIG.TIMEZONE, 'yyyy-MM-dd') === today);
   const spentToday = sum_(ops);
-  const lines = [`Сегодня потрачено: <b>${rub_(spentToday)}</b>`];
+  const daysLeft = s.days - s.day;
+  const lines = [`<b>Итог дня, ${s.day} ${monthName_(s.m, true)}</b>`, '', `Потратил сегодня: <b>${rub_(spentToday)}</b>`];
   ops.forEach(o => lines.push(`• ${rub_(o.amount)} — ${esc_(o.place || o.category)}`));
-  if (s.day < s.days) lines.push(`Завтра можно: <b>${rub_(Math.max(0, s.left) / (s.days - s.day))}</b>`);
-  lines.push(paceLine_(s));
-  if (s.canSave > 0) lines.push(`💰 Свободно сверх плана: ${rub_(s.canSave)} — в копилку`);
+  lines.push('');
+  if (daysLeft > 0) {
+    lines.push(`Можно тратить завтра: <b>${rub_(Math.max(0, s.left) / daysLeft)}</b>`,
+      `(на жизнь до конца месяца осталось ${rub_(Math.max(0, s.left))} на ${daysLeft} ${days_(daysLeft)})`);
+  } else {
+    lines.push('Завтра новый месяц — утром придёт план.');
+  }
+  lines.push('', paceLine_(s));
+  if (s.canSave > 0) lines.push('', `💰 Можно отложить в копилку: ${rub_(s.canSave)}. Это лишнее сверх того, что нужно до конца месяца.`);
   send_(lines.join('\n'));
 }
 
@@ -214,6 +246,7 @@ function dailyReport() {
 function setup() {
   const props = PropertiesService.getScriptProperties();
   if (!prop_('SECRET')) props.setProperty('SECRET', Utilities.getUuid().slice(0, 12));
+  startDate_();
   sheet_();
   ScriptApp.getProjectTriggers().forEach(t => ScriptApp.deleteTrigger(t));
   ScriptApp.newTrigger('monthlyPlan').timeBased().onMonthDay(1).atHour(9).inTimezone(CONFIG.TIMEZONE).create();
@@ -282,6 +315,14 @@ function text_(s) { return ContentService.createTextOutput(s); }
 function sum_(ops) { return ops.reduce((s, o) => s + o.amount, 0); }
 function rub_(n) { return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ' ') + ' ₽'; }
 function esc_(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
-function monthName_(m) {
-  return ['январь', 'февраль', 'март', 'апрель', 'май', 'июнь', 'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь'][m - 1];
+function monthName_(m, genitive) {
+  return (genitive
+    ? ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря']
+    : ['январь', 'февраль', 'март', 'апрель', 'май', 'июнь', 'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь'])[m - 1];
+}
+function days_(n) {
+  const d = n % 10, h = n % 100;
+  if (d === 1 && h !== 11) return 'день';
+  if (d >= 2 && d <= 4 && (h < 12 || h > 14)) return 'дня';
+  return 'дней';
 }
