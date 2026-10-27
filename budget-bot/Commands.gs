@@ -53,6 +53,8 @@ function pollCommands() {
       const msg = u.message;
       if (!msg || !msg.text || String(msg.chat.id) !== String(prop_('CHAT_ID'))) return;
       if (Date.now() / 1000 - msg.date > 10 * 60) return;  // сообщения старше 10 минут не трогаем
+      if (msg.message_id <= Number(props.getProperty('TG_LAST_MSG') || 0)) return;  // на это уже ответили
+      props.setProperty('TG_LAST_MSG', String(msg.message_id));
       try {
         handleCommand_(msg.text);
       } catch (err) {

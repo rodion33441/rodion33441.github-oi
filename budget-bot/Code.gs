@@ -87,7 +87,8 @@ function record_(op) {
     if (twin) {
       const amount = op.amount || twin.amount;
       const place = (op.amount ? twin.place : op.place) || op.place || twin.place;  // название магазина берём от Ozon
-      sheet.getRange(twin.row, 3, 1, 3).setValues([[amount, place, categorize_([place, twin.raw, op.raw].join(' '))]]);
+      const text = [place, twin.raw, op.raw].map(t => String(t).replace(/карта.*$/i, '')).join(' ');
+      sheet.getRange(twin.row, 3, 1, 3).setValues([[amount, place, categorize_(text)]]);
       sheet.getRange(twin.row, 7).setValue(twin.source + '+' + op.source);
       // Сообщение шлём, только когда сумма стала известна впервые
       return { status: 'merged', notify: twin.amount ? null : { type: 'out', amount, place } };
@@ -117,22 +118,27 @@ function parseNotification(text, title, source) {
   if (/(?:^|\s)до\s+\d|акци|предложени|успей|получите|скидк|выгодн|розыгрыш|подключите/i.test(raw)) return null;
   source = String(source || 'ozon').toLowerCase();
   const amount = m ? parseFloat(m[1].replace(/ /g, '').replace(',', '.')) : 0;
+  // Mir Pay: заголовок «Оплата покупки», текст «Сумма 147 ₽. 27.10.2026, 20:49. Карта …»
+  if (/оплата покупки/i.test(norm(title)) || /^сумма\s+\d/i.test(raw)) source = source === 'ozon' ? 'mirpay' : source;
+  const kw = norm(title) + ' ' + raw;  // тип операции ищем и в заголовке
 
   let type = 'other';
-  if (/между (своими )?сч|накопительн|копилк|вклад/i.test(raw)) type = 'internal';  // свои деньги между своими счетами
-  else if (/пополнени|зачислени|поступлени|возврат|кешб[эе]к|кэшб[эе]к|cashback|перевод от|входящ/i.test(raw)) type = 'in';
-  else if (/покупк|оплат|списани|снятие|перевод|плат[её]ж|подписк/i.test(raw)) type = 'out';
+  if (/между (своими )?сч|накопительн|копилк|вклад/i.test(kw)) type = 'internal';  // свои деньги между своими счетами
+  else if (/пополнени|зачислени|поступлени|возврат|кешб[эе]к|кэшб[эе]к|cashback|перевод от|входящ/i.test(kw)) type = 'in';
+  else if (/покупк|оплат|списани|снятие|перевод|плат[её]ж|подписк/i.test(kw)) type = 'out';
   else if (source === 'mirpay' && amount) type = 'out';  // Mir Pay пишет только об оплатах
   if (type === 'out' && CONFIG.OWNER_NAME && raw.toLowerCase().includes(CONFIG.OWNER_NAME.toLowerCase())) type = 'internal';
 
   // Где потратил: «Покупка в KRENDELKOFF» или следующее предложение после суммы
   const shop = raw.match(/(?:покупка|оплата)\s+в\s+([^.]+)/i);
   const after = m ? raw.slice(m.index + m[0].length).replace(/^[.,:;\s]+/, '').split(/\. |\n/)[0] : '';
-  const place = (shop ? shop[1] : after).replace(/,?\s*(доступно|баланс|остаток).*$/i, '').trim().slice(0, 60);
+  let place = (shop ? shop[1] : after).replace(/,?\s*(доступно|баланс|остаток|карта).*$/i, '').trim().slice(0, 60);
+  if (/^[\d.,:\s]*$/.test(place)) place = '';  // у Mir Pay после суммы идут дата и время, а не магазин
 
   // Ozon прячет сумму покупки — запоминаем магазин, сумма придёт от Mir Pay или её впишут вручную
   if (!amount && !(type === 'out' && place)) return null;
-  return { type, amount, place, category: type === 'out' ? categorize_(raw) : '', raw, source };
+  // «Карта Ozon …» в тексте Mir Pay не должна превращать покупку в маркетплейс
+  return { type, amount, place, category: type === 'out' ? categorize_(raw.replace(/карта.*$/i, '')) : '', raw, source };
 }
 
 function categorize_(text) {
@@ -212,7 +218,7 @@ function instantReport_(op) {
   const s = state_(new Date());
   const lines = [];
   if (op.type === 'out') {
-    lines.push(`−${rub_(op.amount)} ${esc_(op.place || op.category)}`);
+    lines.push(`−${rub_(op.amount)} ${esc_(op.place || op.category || 'покупка')}`);
     lines.push(s.restToday >= 0
       ? `На сегодня осталось: <b>${rub_(s.restToday)}</b>`
       : `🔴 Сегодня перерасход на ${rub_(-s.restToday)} — завтра лимит станет меньше`);
