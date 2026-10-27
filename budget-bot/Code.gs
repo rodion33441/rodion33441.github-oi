@@ -317,6 +317,7 @@ function setup() {
   if (prop_('TELEGRAM_TOKEN') && !prop_('CHAT_ID')) {
     try { connectTelegram(); } catch (err) { Logger.log(err.message); }
   }
+  if (typeof setupCommands === 'function') setupCommands();  // setup стёр все расписания — вернём и команды
 }
 
 /** Напиши боту /start, потом запусти эту функцию — она запомнит твой чат. */
