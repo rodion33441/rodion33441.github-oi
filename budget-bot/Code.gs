@@ -27,10 +27,13 @@ const SHEET_NAME = 'Операции';
 const CATEGORIES = [
   ['🍔 Еда', ['пятёрочка', 'пятерочка', 'магнит', 'перекрёсток', 'перекресток', 'вкусвилл', 'ашан', 'лента', 'дикси',
     'spar', 'окей', 'kfc', 'rostics', 'вкусно', 'бургер', 'burger', 'додо', 'dodo', 'самокат', 'лавка', 'кафе', 'столовая',
-    'пекарня', 'кофе', 'coffee', 'шоколадница', 'теремок', 'fix price', 'светофор', 'красное', 'бристоль', 'продукт']],
+    'пекарня', 'кофе', 'coffee', 'шоколадница', 'теремок', 'fix price', 'светофор', 'красное', 'бристоль', 'продукт',
+    'pyaterochka', 'magnit', 'perekrestok', 'vkusvill', 'auchan', 'lenta', 'dixy', 'krasnoe', 'bristol', 'fixprice',
+    'svetofor', 'vkusno', 'teremok', 'cafe', 'kafe', 'stolovaya', 'pekarnya', 'bakery', 'krendel', 'samokat', 'lavka']],
   ['🚌 Транспорт', ['метро', 'транспорт', 'тройка', 'автобус', 'такси', 'taxi', 'yandex go', 'яндекс go', 'ржд', 'электричка',
-    'мосгортранс', 'самокат юрент', 'whoosh', 'юрент']],
-  ['📦 Маркетплейсы', ['ozon', 'озон', 'wildberries', 'вайлдберриз', 'wb ', 'яндекс маркет', 'market', 'aliexpress', 'мегамаркет']],
+    'мосгортранс', 'whoosh', 'юрент', 'metro', 'transport', 'mosgortrans', 'yandex.go', 'yandex go', 'urent']],
+  ['📦 Маркетплейсы', ['ozon', 'озон', 'wildberries', 'вайлдберриз', 'wb ', 'яндекс маркет', 'market', 'aliexpress', 'мегамаркет',
+    'dns', 'мвидео', 'mvideo', 'эльдорадо', 'eldorado']],
   ['📱 Связь', ['билайн', 'beeline', 'мтс', 'mts', 'мегафон', 'megafon', 'теле2', 'tele2', 't2', 'yota', 'йота', 'ростелеком']],
   ['🎮 Развлечения', ['steam', 'playstation', 'xbox', 'кино', 'синема', 'cinema', 'яндекс плюс', 'plus', 'кинопоиск', 'ivi',
     'okko', 'spotify', 'vk музыка', 'boosty', 'donat', 'игр']],
@@ -46,20 +49,53 @@ function doPost(e) {
   }
   if (!data.key || data.key !== prop_('SECRET')) return text_('forbidden');
 
-  const op = parseNotification(data.text);
+  const op = parseNotification(data.text, data.title, data.source);
   if (!op) return text_('skip');
 
+  // Уведомления от Ozon и Mir Pay могут прийти одновременно — обрабатываем по очереди
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  let result;
+  try { result = record_(op); } finally { lock.releaseLock(); }
+
+  if (CONFIG.INSTANT && result.notify) {
+    try { instantReport_(result.notify); } catch (err) { console.error(err); }  // запись в таблицу важнее сообщения
+  }
+  return text_(result.status);
+}
+
+/**
+ * Пишет операцию в таблицу. Одна покупка может прийти дважды: Ozon присылает магазин без суммы,
+ * Mir Pay — сумму. Такие пары в пределах 10 минут склеиваем в одну строку.
+ */
+function record_(op) {
   const sheet = sheet_();
   const now = new Date();
-  // MacroDroid иногда присылает одно уведомление дважды
-  const last = sheet.getLastRow() > 1 ? sheet.getRange(sheet.getLastRow(), 1, 1, 6).getValues()[0] : null;
-  if (last && last[5] === op.raw && now - new Date(last[0]) < 2 * 60 * 1000) return text_('duplicate');
+  const n = Math.min(20, sheet.getLastRow() - 1);
+  const first = sheet.getLastRow() - n + 1;
+  const recent = n <= 0 ? [] : sheet.getRange(first, 1, n, 7).getValues()
+    .map((r, i) => ({ row: first + i, date: new Date(r[0]), type: r[1], amount: Number(r[2]) || 0, place: r[3], raw: r[5], source: String(r[6] || '') }))
+    .filter(r => now - r.date < 10 * 60 * 1000);
 
-  sheet.appendRow([now, op.type, op.amount, op.place, op.category, op.raw]);
-  if (CONFIG.INSTANT && (op.type === 'in' || op.type === 'out')) {
-    try { instantReport_(op); } catch (err) { console.error(err); }  // запись в таблицу важнее сообщения
+  if (recent.some(r => r.raw === op.raw && now - r.date < 2 * 60 * 1000)) return { status: 'duplicate' };
+
+  if (op.type === 'out') {
+    const single = r => r.type === 'out' && r.source !== op.source && !r.source.includes('+');
+    const twin = op.amount
+      ? recent.reverse().find(r => single(r) && (!r.amount || r.amount === op.amount))
+      : recent.reverse().find(r => single(r) && r.amount);
+    if (twin) {
+      const amount = op.amount || twin.amount;
+      const place = (op.amount ? twin.place : op.place) || op.place || twin.place;  // название магазина берём от Ozon
+      sheet.getRange(twin.row, 3, 1, 3).setValues([[amount, place, categorize_([place, twin.raw, op.raw].join(' '))]]);
+      sheet.getRange(twin.row, 7).setValue(twin.source + '+' + op.source);
+      // Сообщение шлём, только когда сумма стала известна впервые
+      return { status: 'merged', notify: twin.amount ? null : { type: 'out', amount, place } };
+    }
   }
-  return text_('ok');
+
+  sheet.appendRow([now, op.type, op.amount || '', op.place, op.category, op.raw, op.source]);
+  return { status: 'ok', notify: op.amount && (op.type === 'in' || op.type === 'out') ? op : null };
 }
 
 function doGet() {
@@ -67,24 +103,36 @@ function doGet() {
 }
 
 /** Разбирает текст уведомления: «Покупка на 250 ₽. Пятёрочка» → {type, amount, place, category}. */
-function parseNotification(text) {
-  const raw = String(text || '').replace(/[\u00a0\u202f\u2009]/g, ' ').replace(/\s+/g, ' ').trim();
-  const m = raw.match(/(\d[\d ]*(?:[.,]\d{1,2})?)\s*(?:₽|руб|RUB|р\.)/i);
-  if (!m) return null;
-  const amount = parseFloat(m[1].replace(/ /g, '').replace(',', '.'));
-  if (!amount) return null;
+function parseNotification(text, title, source) {
+  const norm = t => String(t || '').replace(/[\u00a0\u202f\u2009]/g, ' ').replace(/\s+/g, ' ').trim();
+  const amountRe = /(\d[\d ]*(?:[.,]\d{1,2})?)\s*(?:₽|руб|RUB|р\.)/i;
+  let raw = norm(text);
+  let m = raw.match(amountRe);
+  if (!m && amountRe.test(norm(title))) {  // некоторые приложения пишут сумму в заголовке
+    raw = norm(title) + '. ' + raw;
+    m = raw.match(amountRe);
+  }
+  if (!raw) return null;
+  // Рекламу вроде «Кешбэк до 1000 ₽ в ноябре» не считаем
+  if (/(?:^|\s)до\s+\d|акци|предложени|успей|получите|скидк|выгодн|розыгрыш|подключите/i.test(raw)) return null;
+  source = String(source || 'ozon').toLowerCase();
+  const amount = m ? parseFloat(m[1].replace(/ /g, '').replace(',', '.')) : 0;
 
   let type = 'other';
   if (/между (своими )?сч|накопительн|копилк|вклад/i.test(raw)) type = 'internal';  // свои деньги между своими счетами
   else if (/пополнени|зачислени|поступлени|возврат|кешб[эе]к|кэшб[эе]к|cashback|перевод от|входящ/i.test(raw)) type = 'in';
   else if (/покупк|оплат|списани|снятие|перевод|плат[её]ж|подписк/i.test(raw)) type = 'out';
+  else if (source === 'mirpay' && amount) type = 'out';  // Mir Pay пишет только об оплатах
   if (type === 'out' && CONFIG.OWNER_NAME && raw.toLowerCase().includes(CONFIG.OWNER_NAME.toLowerCase())) type = 'internal';
 
-  // Где потратил — обычно следующее предложение после суммы
-  const after = raw.slice(m.index + m[0].length).replace(/^[.,:;\s]+/, '');
-  const place = after.split(/\. |\n/)[0].replace(/,?\s*(доступно|баланс|остаток).*$/i, '').trim().slice(0, 60);
+  // Где потратил: «Покупка в KRENDELKOFF» или следующее предложение после суммы
+  const shop = raw.match(/(?:покупка|оплата)\s+в\s+([^.]+)/i);
+  const after = m ? raw.slice(m.index + m[0].length).replace(/^[.,:;\s]+/, '').split(/\. |\n/)[0] : '';
+  const place = (shop ? shop[1] : after).replace(/,?\s*(доступно|баланс|остаток).*$/i, '').trim().slice(0, 60);
 
-  return { type, amount, place, category: type === 'out' ? categorize_(raw) : '', raw };
+  // Ozon прячет сумму покупки — запоминаем магазин, сумма придёт от Mir Pay или её впишут вручную
+  if (!amount && !(type === 'out' && place)) return null;
+  return { type, amount, place, category: type === 'out' ? categorize_(raw) : '', raw, source };
 }
 
 function categorize_(text) {
@@ -183,6 +231,11 @@ function dailyReport() {
   const s = state_(new Date());
   const lines = [`<b>Итог дня, ${s.day} ${monthName_(s.m, true)}</b>`, '', `Потратил сегодня: <b>${rub_(s.spentToday)}</b>`];
   s.todayOps.forEach(o => lines.push(`• ${rub_(o.amount)} — ${esc_(o.place || o.category)}`));
+  const unknown = noAmountToday_();
+  if (unknown.length) {
+    lines.push('', `❓ Банк не показал сумму: ${unknown.map(esc_).join(', ')}`,
+      `Впиши суммы в столбец «Сумма»: ${sheet_().getParent().getUrl()}`);
+  }
   lines.push('', s.restToday >= 0
     ? `🟢 Уложился в лимит (было можно ${rub_(s.todayLimit)})`
     : `🔴 Перерасход на ${rub_(-s.restToday)} (было можно ${rub_(s.todayLimit)})`);
@@ -286,10 +339,21 @@ function sheet_() {
   let sh = ss.getSheetByName(SHEET_NAME);
   if (!sh) {
     sh = ss.insertSheet(SHEET_NAME);
-    sh.appendRow(['Дата', 'Тип', 'Сумма', 'Где', 'Категория', 'Текст уведомления']);
+    sh.appendRow(['Дата', 'Тип', 'Сумма', 'Где', 'Категория', 'Текст уведомления', 'Источник']);
     sh.setFrozenRows(1);
   }
+  if (!sh.getRange(1, 7).getValue()) sh.getRange(1, 7).setValue('Источник');  // таблицы, созданные до Mir Pay
   return sh;
+}
+
+/** Сегодняшние покупки, для которых так и не пришла сумма. */
+function noAmountToday_() {
+  const sh = sheet_();
+  if (sh.getLastRow() < 2) return [];
+  const today = Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'yyyy-MM-dd');
+  return sh.getRange(2, 1, sh.getLastRow() - 1, 4).getValues()
+    .filter(r => r[0] && r[1] === 'out' && !r[2] && Utilities.formatDate(new Date(r[0]), CONFIG.TIMEZONE, 'yyyy-MM-dd') === today)
+    .map(r => String(r[3]));
 }
 
 function readOps_() {
