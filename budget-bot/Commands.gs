@@ -31,25 +31,37 @@ function setupCommands() {
     .filter(t => t.getHandlerFunction() === 'pollCommands')
     .forEach(t => ScriptApp.deleteTrigger(t));
   ScriptApp.newTrigger('pollCommands').timeBased().everyMinutes(1).create();
+  // Старые сообщения в очереди пропускаем — отвечаем только на новые
+  const old = tg_('getUpdates', { offset: -1, timeout: 0 }).result || [];
+  if (old.length) PropertiesService.getScriptProperties().setProperty('TG_OFFSET', String(old[0].update_id + 1));
   tg_('setMyCommands', { commands: JSON.stringify(COMMANDS.map(([cmd, , description]) => ({ command: cmd, description }))) });
   send_('✅ Команды подключены! Напиши /help');
 }
 
 /** Раз в минуту: забрать новые сообщения и ответить. */
 function pollCommands() {
-  const props = PropertiesService.getScriptProperties();
-  const offset = Number(props.getProperty('TG_OFFSET') || 0);
-  const updates = tg_('getUpdates', { offset: offset, timeout: 0 }).result || [];
-  updates.forEach(u => {
-    props.setProperty('TG_OFFSET', String(u.update_id + 1));  // сразу, чтобы не ответить дважды при ошибке
-    const msg = u.message;
-    if (!msg || !msg.text || String(msg.chat.id) !== String(prop_('CHAT_ID'))) return;
-    try {
-      handleCommand_(msg.text);
-    } catch (err) {
-      send_('Что-то пошло не так: ' + esc_(err.message));
-    }
-  });
+  // Google иногда запускает проверку дважды одновременно — вторая копия просто выходит
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(1000)) return;
+  try {
+    const props = PropertiesService.getScriptProperties();
+    const offset = Number(props.getProperty('TG_OFFSET') || 0);
+    const updates = tg_('getUpdates', { offset: offset, timeout: 0 }).result || [];
+    updates.forEach(u => {
+      if (u.update_id < offset) return;
+      props.setProperty('TG_OFFSET', String(u.update_id + 1));  // сразу, чтобы не ответить дважды при ошибке
+      const msg = u.message;
+      if (!msg || !msg.text || String(msg.chat.id) !== String(prop_('CHAT_ID'))) return;
+      if (Date.now() / 1000 - msg.date > 10 * 60) return;  // сообщения старше 10 минут не трогаем
+      try {
+        handleCommand_(msg.text);
+      } catch (err) {
+        send_('Что-то пошло не так: ' + esc_(err.message));
+      }
+    });
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function handleCommand_(text) {
@@ -165,11 +177,7 @@ function cmdSpend_(args) {
   const amount = parseAmount_(args[0]);
   if (!amount) return send_('Напиши так: /spend 300 шаурма');
   const place = args.slice(1).join(' ') || 'Наличные';
-  const lock = LockService.getScriptLock();
-  lock.waitLock(20000);
-  try {
-    sheet_().appendRow([new Date(), 'out', amount, place, categorize_(place), 'вручную: ' + place, 'manual']);
-  } finally { lock.releaseLock(); }
+  sheet_().appendRow([new Date(), 'out', amount, place, categorize_(place), 'вручную: ' + place, 'manual']);  // таблица уже под замком pollCommands
   instantReport_({ type: 'out', amount, place });
 }
 
