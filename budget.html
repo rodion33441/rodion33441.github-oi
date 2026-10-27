@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Бюджет на месяц</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --text: #1d2330; --muted: #677085;
+    --line: #e2e5eb; --accent: #2f6fdf; --good: #1f8a4c; --bad: #c43d3d; --warn: #b7791f;
+    --save-bg: #e8f5ee; --bill-bg: #fdf0e6; --pay-bg: #e9f0fd; --today: #fff7d6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12151b; --card: #1b2029; --text: #e6e9ef; --muted: #9aa3b5;
+      --line: #2c3340; --accent: #6b9cff; --good: #4cc27f; --bad: #ff7272; --warn: #e3b05a;
+      --save-bg: #183326; --bill-bg: #3a2a1a; --pay-bg: #1b2a45; --today: #3a3420;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 960px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 24px; margin: 8px 0 4px; }
+  h2 { font-size: 17px; margin: 0 0 12px; }
+  p.sub { color: var(--muted); margin: 0 0 16px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin-bottom: 16px; }
+  .row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
+  .row input[type=text] { flex: 2 1 140px; }
+  .row input.num { flex: 1 1 100px; }
+  .row input.day { flex: 0 0 72px; }
+  input, select, button { font: inherit; color: inherit; }
+  input { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; min-width: 0; }
+  button { background: transparent; border: 1px solid var(--line); border-radius: 8px; padding: 7px 12px; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.x { padding: 7px 10px; color: var(--bad); }
+  label.lbl { color: var(--muted); font-size: 13px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 720px) { .grid2 { grid-template-columns: 1fr; } }
+  .month-nav { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .month-nav strong { font-size: 19px; text-transform: capitalize; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; }
+  .stat { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+  .stat .k { color: var(--muted); font-size: 13px; }
+  .stat .v { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .good { color: var(--good); } .bad { color: var(--bad); } .warn { color: var(--warn); }
+  .alert { border-radius: 10px; padding: 10px 12px; margin-top: 12px; border: 1px solid var(--line); }
+  .alert.bad { border-color: var(--bad); }
+  .alert.warn { border-color: var(--warn); }
+  .tablewrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { padding: 6px 8px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; font-size: 13px; }
+  td.n, th.n { text-align: right; white-space: nowrap; }
+  tr.today td { background: var(--today); }
+  tr.weekend td:first-child { color: var(--bad); }
+  td input { width: 90px; text-align: right; padding: 4px 6px; }
+  .tag { display: inline-block; border-radius: 6px; padding: 1px 6px; margin: 1px 4px 1px 0; font-size: 13px; }
+  .tag.pay { background: var(--pay-bg); } .tag.save { background: var(--save-bg); } .tag.bill { background: var(--bill-bg); }
+  ul.tips { margin: 0; padding-left: 20px; } ul.tips li { margin-bottom: 4px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Бюджет на месяц</h1>
+  <p class="sub">Сначала откладываешь, потом тратишь. План пересчитывается сам для каждого месяца — просто открой страницу.</p>
+
+  <div class="grid2">
+    <section class="card">
+      <h2>Доходы</h2>
+      <div id="incomes"></div>
+      <button id="addIncome">+ доход</button>
+    </section>
+    <section class="card">
+      <h2>Обязательные платежи</h2>
+      <div id="bills"></div>
+      <button id="addBill">+ платёж</button>
+    </section>
+  </div>
+
+  <section class="card">
+    <h2>Накопления</h2>
+    <div class="row">
+      <label class="lbl" for="savePct">Откладывать, % от дохода</label>
+      <input id="savePct" class="num" type="number" min="0" max="100" step="1" style="flex:0 0 90px">
+      <label class="lbl" for="startBal">Остаток на начало этого месяца, ₽</label>
+      <input id="startBal" class="num" type="number" step="100" style="flex:0 0 120px">
+    </div>
+    <div class="lbl">Классика — 10–20%. Правило 50/30/20: 50% на нужное, 30% на хотелки, 20% в копилку.</div>
+  </section>
+
+  <section class="card">
+    <div class="month-nav">
+      <button id="prev" aria-label="Предыдущий месяц">←</button>
+      <strong id="monthTitle"></strong>
+      <button id="next" aria-label="Следующий месяц">→</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Итог месяца</h2>
+    <div class="stats" id="stats"></div>
+    <div id="alerts"></div>
+  </section>
+
+  <section class="card">
+    <h2>По неделям</h2>
+    <div class="tablewrap"><table id="weeks"></table></div>
+  </section>
+
+  <section class="card">
+    <h2>Календарь: когда и сколько</h2>
+    <div class="lbl" style="margin-bottom:8px">Вписывай, сколько потратил за день — лимит на оставшиеся дни пересчитается.</div>
+    <div class="tablewrap"><table id="days"></table></div>
+  </section>
+
+  <section class="card">
+    <h2>Светлое будущее</h2>
+    <ul class="tips" id="future"></ul>
+  </section>
+</main>
+
+<script>
+const SETTINGS_KEY = 'budget-settings';
+const fmt = n => Math.round(n).toLocaleString('ru-RU') + ' ₽';
+const pad = n => String(n).padStart(2, '0');
+
+function load(key, fallback) {
+  try { const v = JSON.parse(localStorage.getItem(key)); return v ?? fallback; } catch { return fallback; }
+}
+function save(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
+}
+
+const settings = load(SETTINGS_KEY, {
+  incomes: [{ name: 'Зарплата', amount: 0, day: 10 }],
+  bills: [{ name: 'Связь и интернет', amount: 0, day: 5 }],
+  savePct: 20
+});
+
+const now = new Date();
+let year = now.getFullYear(), month = now.getMonth();
+const monthKey = () => `budget-month-${year}-${pad(month + 1)}`;
+let monthData = load(monthKey(), { startBal: 0, spent: {} });
+
+function listEditor(container, items, placeholder) {
+  container.innerHTML = '';
+  items.forEach((item, i) => {
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.innerHTML = `
+      <input type="text" placeholder="${placeholder}" aria-label="Название">
+      <input class="num" type="number" min="0" step="100" placeholder="Сумма, ₽" aria-label="Сумма">
+      <input class="day" type="number" min="1" max="31" placeholder="День" aria-label="Число месяца">
+      <button class="x" aria-label="Удалить">✕</button>`;
+    const [name, amount, day] = row.querySelectorAll('input');
+    name.value = item.name; amount.value = item.amount || ''; day.value = item.day;
+    name.oninput = () => { item.name = name.value; update(); };
+    amount.oninput = () => { item.amount = +amount.value || 0; update(); };
+    day.oninput = () => { item.day = Math.min(31, Math.max(1, +day.value || 1)); update(); };
+    row.querySelector('button').onclick = () => { items.splice(i, 1); renderEditors(); update(); };
+    container.appendChild(row);
+  });
+}
+
+function renderEditors() {
+  listEditor(document.getElementById('incomes'), settings.incomes, 'Зарплата, аванс…');
+  listEditor(document.getElementById('bills'), settings.bills, 'Аренда, кредит…');
+  document.getElementById('savePct').value = settings.savePct;
+}
+
+function calculate() {
+  const days = new Date(year, month + 1, 0).getDate();
+  const clampDay = d => Math.min(d, days);  // платёж 31-го в коротком месяце — в последний день
+  const income = settings.incomes.reduce((s, x) => s + x.amount, 0);
+  const bills = settings.bills.reduce((s, x) => s + x.amount, 0);
+  const savings = Math.round(income * settings.savePct / 100);
+  const free = income - bills - savings;
+
+  const isCurrent = year === now.getFullYear() && month === now.getMonth();
+  const isPast = year < now.getFullYear() || (year === now.getFullYear() && month < now.getMonth());
+  const today = isCurrent ? now.getDate() : (isPast ? days + 1 : 0);
+
+  let spentBefore = 0, balance = monthData.startBal || 0, minBalance = Infinity, minDay = 0;
+  const rows = [];
+  for (let d = 1; d <= days; d++) {
+    const date = new Date(year, month, d);
+    const events = [];
+    settings.incomes.filter(x => clampDay(x.day) === d && x.amount).forEach(x => {
+      const part = Math.round(savings * x.amount / income);
+      events.push({ cls: 'pay', text: `${x.name || 'Доход'}: +${fmt(x.amount)}` });
+      if (part) events.push({ cls: 'save', text: `Сразу отложи ${fmt(part)}` });
+      balance += x.amount - part;
+    });
+    settings.bills.filter(x => clampDay(x.day) === d && x.amount).forEach(x => {
+      events.push({ cls: 'bill', text: `${x.name || 'Платёж'}: −${fmt(x.amount)}` });
+      balance -= x.amount;
+    });
+    // Лимит на день: что осталось от свободных денег делим на оставшиеся дни
+    const limit = Math.max(0, (free - spentBefore) / (days - d + 1));
+    const spent = monthData.spent[d];
+    const hasSpent = spent !== undefined && spent !== '';
+    const dayCost = hasSpent ? +spent : limit;
+    balance -= dayCost;
+    if (balance < minBalance) { minBalance = balance; minDay = d; }
+    spentBefore += dayCost;
+    rows.push({ d, date, events, limit, spent: hasSpent ? +spent : null, balance });
+  }
+  const spentTotal = Object.values(monthData.spent).reduce((s, x) => s + (+x || 0), 0);
+  return { days, income, bills, savings, free, rows, today, minBalance, minDay, spentTotal };
+}
+
+function update() {
+  save(SETTINGS_KEY, settings);
+  save(monthKey(), monthData);
+  const c = calculate();
+  const monthName = new Date(year, month, 1).toLocaleDateString('ru-RU', { month: 'long', year: 'numeric' });
+  document.getElementById('monthTitle').textContent = monthName;
+  document.getElementById('startBal').value = monthData.startBal || '';
+
+  const todayRow = c.rows.find(r => r.d === c.today);
+  const stats = [
+    ['Доход', fmt(c.income)],
+    ['Обязательные', fmt(c.bills)],
+    ['В копилку', `<span class="good">${fmt(c.savings)}</span>`],
+    ['На жизнь', `<span class="${c.free < 0 ? 'bad' : ''}">${fmt(c.free)}</span>`],
+    ['В среднем в день', fmt(Math.max(0, c.free) / c.days)],
+  ];
+  if (todayRow) stats.push(['Можно сегодня', `<span class="good">${fmt(todayRow.limit)}</span>`]);
+  if (c.spentTotal) stats.push(['Уже потрачено', fmt(c.spentTotal)]);
+  document.getElementById('stats').innerHTML = stats
+    .map(([k, v]) => `<div class="stat"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
+
+  const alerts = [];
+  if (!c.income) alerts.push(['warn', 'Впиши свои доходы и платежи выше — и план посчитается.']);
+  if (c.free < 0) alerts.push(['bad', `Расходы больше дохода на ${fmt(-c.free)}. Уменьши процент накоплений или обязательные платежи.`]);
+  if (c.income && c.minBalance < 0) alerts.push(['warn',
+    `К ${c.minDay}-му числу денег на руках может не хватить (${fmt(c.minBalance)}). До получки трать меньше лимита или впиши остаток на начало месяца.`]);
+  document.getElementById('alerts').innerHTML = alerts.map(([cls, t]) => `<div class="alert ${cls}">${t}</div>`).join('');
+
+  // Недели: пн–вс
+  const weeks = [];
+  c.rows.forEach(r => {
+    const wd = (r.date.getDay() + 6) % 7;
+    if (!weeks.length || wd === 0) weeks.push({ from: r.d, to: r.d, plan: 0, spent: 0, has: false });
+    const w = weeks[weeks.length - 1];
+    w.to = r.d; w.plan += r.spent ?? r.limit;
+    if (r.spent !== null) { w.spent += r.spent; w.has = true; }
+  });
+  document.getElementById('weeks').innerHTML =
+    '<tr><th>Неделя</th><th class="n">Можно потратить</th><th class="n">Потрачено</th></tr>' +
+    weeks.map(w => `<tr><td>${w.from}–${w.to}</td><td class="n">${fmt(w.plan)}</td><td class="n">${w.has ? fmt(w.spent) : '—'}</td></tr>`).join('');
+
+  const table = document.getElementById('days');
+  table.innerHTML = '<tr><th>День</th><th>Что сделать</th><th class="n">Лимит</th><th class="n">Потратил</th><th class="n">На руках</th></tr>';
+  c.rows.forEach(r => {
+    const tr = document.createElement('tr');
+    const wd = r.date.getDay();
+    if (r.d === c.today) tr.classList.add('today');
+    if (wd === 0 || wd === 6) tr.classList.add('weekend');
+    tr.innerHTML = `
+      <td>${r.d} ${r.date.toLocaleDateString('ru-RU', { weekday: 'short' })}</td>
+      <td>${r.events.map(e => `<span class="tag ${e.cls}">${e.text}</span>`).join('')}</td>
+      <td class="n">${fmt(r.limit)}</td>
+      <td class="n"><input type="number" min="0" step="50" aria-label="Потрачено ${r.d}-го"></td>
+      <td class="n ${r.balance < 0 ? 'bad' : ''}">${fmt(r.balance)}</td>`;
+    const inp = tr.querySelector('input');
+    inp.value = r.spent ?? '';
+    inp.onchange = () => {
+      if (inp.value === '') delete monthData.spent[r.d]; else monthData.spent[r.d] = +inp.value;
+      update();
+    };
+    table.appendChild(tr);
+  });
+
+  const yearly = c.savings * 12;
+  const monthlyNeed = c.bills + Math.max(0, c.free);
+  const cushion = monthlyNeed * 6;
+  const future = [];
+  if (c.savings) {
+    future.push(`За год отложишь <b>${fmt(yearly)}</b>, за 5 лет — <b>${fmt(yearly * 5)}</b> (без процентов).`);
+    // Вклад под 12% годовых с ежемесячной капитализацией, 5 лет
+    const r = 0.12 / 12; let acc = 0;
+    for (let i = 0; i < 60; i++) acc = acc * (1 + r) + c.savings;
+    future.push(`Если класть на вклад/накопительный счёт под ~12% годовых — через 5 лет будет около <b>${fmt(acc)}</b>.`);
+    if (monthlyNeed) future.push(`Первая цель — подушка безопасности на 6 месяцев: <b>${fmt(cushion)}</b>. Это примерно ${Math.ceil(cushion / c.savings)} мес. накоплений.`);
+  }
+  future.push('Откладывай в день получки, а не «что останется в конце месяца».');
+  future.push('Держи копилку на отдельном счёте, без карты — так меньше соблазна.');
+  future.push('Не уложился в лимит сегодня — завтра лимит станет меньше автоматически. Сэкономил — станет больше.');
+  document.getElementById('future').innerHTML = future.map(t => `<li>${t}</li>`).join('');
+}
+
+function changeMonth(delta) {
+  month += delta;
+  if (month < 0) { month = 11; year--; }
+  if (month > 11) { month = 0; year++; }
+  monthData = load(monthKey(), { startBal: 0, spent: {} });
+  update();
+}
+
+document.getElementById('addIncome').onclick = () => { settings.incomes.push({ name: '', amount: 0, day: 25 }); renderEditors(); };
+document.getElementById('addBill').onclick = () => { settings.bills.push({ name: '', amount: 0, day: 1 }); renderEditors(); };
+document.getElementById('savePct').oninput = e => { settings.savePct = Math.min(100, Math.max(0, +e.target.value || 0)); update(); };
+document.getElementById('startBal').oninput = e => { monthData.startBal = +e.target.value || 0; update(); };
+document.getElementById('prev').onclick = () => changeMonth(-1);
+document.getElementById('next').onclick = () => changeMonth(1);
+
+renderEditors();
+update();
+</script>
+</body>
+</html>
